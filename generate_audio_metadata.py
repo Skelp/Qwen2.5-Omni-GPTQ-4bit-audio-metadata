@@ -1,41 +1,72 @@
 """
-Audio Metadata Generator with Qwen2.5-Omni GPTQ Model
+Audio Metadata Generator with Qwen2.5-Omni GPTQ Model (Debug‑enabled)
 
-Additional, Non-Optional Requirements:
+Additional, Non‑Optional Requirements:
 - flash_attn
 - qwen_omni_utils
 
 Usable Environment Example:
 - Arch Linux
-- RTX 4070 Ti SUPER (16 GB VRAM)
-- Python 3.10.17
+- RTX 4070 Ti SUPER (16 GB VRAM)
+- Python 3.10.17
 - Reference `example_environment.txt` for installed packages
 
-Usage:
-    CUDA_VISIBLE_DEVICES=0 python3 ./generate_audio_metadata.py '{your_audio_directory}' --model-path Qwen/Qwen2.5-Omni-7B-GPTQ-Int4
+Usage (normal):
+    CUDA_VISIBLE_DEVICES=0 python3 ./generate_audio_metadata_debug.py '{your_audio_directory}' --model-path Qwen/Qwen2.5-Omni-7B-GPTQ-Int4
+
+Usage (with VRAM tracking):
+    CUDA_VISIBLE_DEVICES=0 python3 ./generate_audio_metadata_debug.py '{your_audio_directory}' --debug-vram
 
 Expected VRAM Usage: 
-    average of 8 GB, spikes near the start between 12-16 GB (optimization needed still)
+    average of 8 GB, spikes near the start between 12‑16 GB (optimization needed still)
 """
 
 import os
-import torch
+import sys
+import gc
+import datetime
 import argparse
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-# GPTQ imports
+import torch
 
-# shoutout to the Qwen Team for making the sub-directories contain hyphens! :)
-# XOXO
-import os, importlib.util, sys
+# ────────────────────────── DEBUG HELPERS ────────────────────────── #
+DEBUG_VRAM: bool = False  # set in main()
+
+
+def _fmt_mb(bytes_val: int) -> float:
+    return bytes_val / (1024 ** 2)
+
+
+def log_vram(event: str) -> None:
+    """Print a timestamped one‑liner with current & peak VRAM stats."""
+    if not DEBUG_VRAM or not torch.cuda.is_available():
+        return
+
+    torch.cuda.synchronize()
+    alloc = _fmt_mb(torch.cuda.memory_allocated())
+    reserved = _fmt_mb(torch.cuda.memory_reserved())
+    max_alloc = _fmt_mb(torch.cuda.max_memory_allocated())
+
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{now}] VRAM | {event:<40} | allocated={alloc:7.0f} MB | reserved={reserved:7.0f} MB | peak={max_alloc:7.0f} MB")
+
+
+def reset_vram_peak() -> None:
+    if DEBUG_VRAM and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
+# ────────────────────────── GPTQ imports ────────────────────────── #
+# shout‑out to the Qwen Team for making the sub‑directories contain hyphens! :)
 
 here = os.path.dirname(os.path.abspath(__file__))
 module_path = os.path.join(here, "low-VRAM-mode", "modeling_qwen2_5_omni_low_VRAM_mode.py")
 
+import importlib.util
 spec = importlib.util.spec_from_file_location("modeling_qwen2_5_omni_low_VRAM_mode", module_path)
 module = importlib.util.module_from_spec(spec)
-
-spec.loader.exec_module(module)
+spec.loader.exec_module(module)  # type: ignore
 
 Qwen2_5OmniForConditionalGeneration = module.Qwen2_5OmniForConditionalGeneration
 from transformers import Qwen2_5OmniProcessor
@@ -61,11 +92,8 @@ class Qwen25OmniThinkerGPTQ(BaseGPTQModel):
     base_modules = [
         "thinker.model.embed_tokens", 
         "thinker.model.norm", 
-        "token2wav", 
         "thinker.audio_tower", 
-        "thinker.model.rotary_emb",
-        "thinker.visual", 
-        "talker"
+        "thinker.model.rotary_emb"
     ]
     pre_lm_head_norm_module = "thinker.model.norm"
     require_monkeypatch = False
@@ -79,11 +107,11 @@ class Qwen25OmniThinkerGPTQ(BaseGPTQModel):
     ]
    
     def pre_quantize_generate_hook_start(self):
-        self.thinker.visual = move_to(self.thinker.visual, device=self.quantize_config.device)
+        self.disable_talker()
+        self.has_talker = False
         self.thinker.audio_tower = move_to(self.thinker.audio_tower, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
-        self.thinker.visual = move_to(self.thinker.visual, device=CPU)
         self.thinker.audio_tower = move_to(self.thinker.audio_tower, device=CPU)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
@@ -97,30 +125,8 @@ SUPPORTED_MODELS.extend(["qwen2_5_omni"])
 @classmethod
 def patched_from_config(cls, config, *args, **kwargs):
     kwargs.pop("trust_remote_code", None)
-    
-    # Store model_path from kwargs before creating model
     model_path = kwargs.get("model_path", None)
-    
     model = cls._from_config(config, **kwargs)
-    
-    if model_path:
-        spk_path = cached_file(
-            model_path,
-            "spk_dict.pt",
-            subfolder=kwargs.pop("subfolder", None),
-            cache_dir=kwargs.pop("cache_dir", None),
-            force_download=kwargs.pop("force_download", False),
-            proxies=kwargs.pop("proxies", None),
-            resume_download=kwargs.pop("resume_download", None),
-            local_files_only=kwargs.pop("local_files_only", False),
-            token=kwargs.pop("use_auth_token", None),
-            revision=kwargs.pop("revision", None),
-        )
-        if spk_path is None:
-            raise ValueError(f"Speaker dictionary not found at {spk_path}")
-        
-        model.load_speakers(spk_path)
-    
     return model
 
 Qwen2_5OmniForConditionalGeneration.from_config = patched_from_config
@@ -156,14 +162,19 @@ SYSTEM_PROMPT = """Analyze the input audio and generate 6 description variants. 
   },
   "lyrical_rap_check": <bool>
 }
-"""
+```"""
 
-def load_model(model_path, device_map=None):
-    """Load the GPTQ model and processor"""
-    # Download model if using HuggingFace repo
+
+# ────────────────────────── Model loading ────────────────────────── #
+
+def load_model(model_path: str, device_map: Optional[Dict[str, str]] = None):
+    """Download (if needed) and load the GPTQ model + processor."""
+    log_vram("load_model: start")
+
+    # Local cache if HuggingFace repo
     if not os.path.exists(model_path):
-        model_path = snapshot_download(repo_id=model_path)
-    
+        model_path = snapshot_download(repo_id=model_path)  # type: ignore
+
     if device_map is None:
         device_map = {
             "thinker.model": "cuda", 
@@ -180,161 +191,162 @@ def load_model(model_path, device_map=None):
         device_map=device_map, 
         torch_dtype=torch.float16,
         attn_implementation="flash_attention_2",
-        model_path=model_path  # Pass model_path for speaker dictionary loading
+        parallel_packing=False,
+        cache_block_outputs=False,
+        true_sequential=True,
+        model_path=model_path
     )
-    
-    # Disable audio output components since we only need text
+    log_vram("load_model: after GPTQModel.load()")
+
+    # Try disabling audio output to avoid extra buffers
     try:
-        if hasattr(model, 'disable_talker'):
+        if hasattr(model, "disable_talker"):
             model.disable_talker()
-            print("Audio output components disabled")
-        if hasattr(model, 'has_talker'):
+        if hasattr(model, "has_talker"):
             model.has_talker = False
     except Exception as e:
         print(f"Note: Could not disable audio components: {e}")
-    
-    # Ensure visual and audio_tower are on CPU to save VRAM
-    if hasattr(model, 'thinker'):
-        if hasattr(model.thinker, 'visual') and model.thinker.visual is not None:
-            model.thinker.visual = model.thinker.visual.to('cpu')
-        if hasattr(model.thinker, 'audio_tower') and model.thinker.audio_tower is not None:
-            model.thinker.audio_tower = model.thinker.audio_tower.to('cpu')
-    
-    # Clear any residual GPU memory
+
+    # Keep visual/audio tower off‑GPU by default
+    if hasattr(model, "thinker"):
+        if getattr(model.thinker, "visual", None) is not None:
+            model.thinker.visual = model.thinker.visual.to("cpu")
+        if getattr(model.thinker, "audio_tower", None) is not None:
+            model.thinker.audio_tower = model.thinker.audio_tower.to("cpu")
+
     torch.cuda.empty_cache()
-    
+    log_vram("load_model: ready (after empty_cache)")
+    reset_vram_peak()
+
     processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
-    
     return model, processor
 
-def analyze_audio(audio_path, model, processor, system_prompt=SYSTEM_PROMPT):
-    """Analyze an audio file and return the text response"""
-    
-    # Prepare messages
+
+# ────────────────────────── Audio analysis ────────────────────────── #
+
+def analyze_audio(audio_path: str, model, processor, *, system_prompt: str = SYSTEM_PROMPT):
+    """Run one inference; heavy blocks are wrapped with VRAM logging."""
+
+    log_vram(f"analyze_audio: {os.path.basename(audio_path)} — start")
+    reset_vram_peak()
+
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-        {"role": "user", "content": [{"type": "audio", "audio": audio_path}]}
+        {"role": "user", "content": [{"type": "audio", "audio": audio_path}]},
     ]
-    
-    # Apply chat template
+
     text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    
-    # Process multimedia info
     audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
-    
-    # Prepare inputs
-    inputs = processor(text=text, audio=audios, images=images, videos=videos, 
-                      return_tensors="pt", padding=True, use_audio_in_video=False)
-    
-    # Move visual and audio components to GPU only when needed
-    if hasattr(model, 'thinker'):
-        if hasattr(model.thinker, 'visual') and model.thinker.visual is not None:
-            model.thinker.visual = model.thinker.visual.to('cuda')
-        if hasattr(model.thinker, 'audio_tower') and model.thinker.audio_tower is not None:
-            model.thinker.audio_tower = model.thinker.audio_tower.to('cuda')
-    
-    # Move inputs to GPU with proper dtype handling
-    inputs_cuda = {}
+    inputs = processor(
+        text=text,
+        audio=audios,
+        images=images,
+        videos=videos,
+        return_tensors="pt",
+        padding=True,
+        use_audio_in_video=False,
+    )
+    log_vram("inputs prepared (CPU)")
+
+    # Activate audio tower on GPU only when required
+    if hasattr(model, "thinker") and getattr(model.thinker, "audio_tower", None) is not None:
+        model.thinker.audio_tower = model.thinker.audio_tower.to("cuda")
+    log_vram("audio_tower → GPU")
+
+    # Copy tensors to GPU and match dtypes
+    inputs_cuda: Dict[str, Any] = {}
     for k, v in inputs.items():
-        if hasattr(v, 'to'):
-            inputs_cuda[k] = v.to('cuda')
-            if hasattr(model, 'dtype') and hasattr(v, 'dtype') and v.dtype.is_floating_point:
+        if hasattr(v, "to"):
+            inputs_cuda[k] = v.to("cuda")
+            if hasattr(model, "dtype") and v.dtype.is_floating_point:
                 inputs_cuda[k] = inputs_cuda[k].to(model.dtype)
         else:
             inputs_cuda[k] = v
-    
-    # Generate response using the thinker component directly (text only)
-    with torch.no_grad():
-        # Use the thinker model directly to avoid speaker validation
-        if hasattr(model, 'thinker'):
-            output_ids = model.thinker.generate(
-                **inputs_cuda, 
-                max_new_tokens=4096,
-                use_audio_in_video=False
-            )
-        else:
-            # Fallback to regular generate with explicit parameters
-            output_ids = model.generate(
-                **inputs_cuda, 
-                return_audio=False,
-                use_audio_in_video=False
-            )
-    
-    # Move visual and audio components back to CPU to save VRAM
-    if hasattr(model, 'thinker'):
-        if hasattr(model.thinker, 'visual') and model.thinker.visual is not None:
-            model.thinker.visual = model.thinker.visual.to('cpu')
-        if hasattr(model.thinker, 'audio_tower') and model.thinker.audio_tower is not None:
-            model.thinker.audio_tower = model.thinker.audio_tower.to('cpu')
-    
-    # Clear GPU cache
-    torch.cuda.empty_cache()
-    
-    generate_ids = output_ids[:, inputs.input_ids.size(1):]
+    log_vram("inputs → GPU")
 
-    # Decode the response
+    # ── Generation ──────────────────────────────────────────────
+    with torch.no_grad():
+        output_ids = (
+            model.thinker.generate(
+                **inputs_cuda,
+                max_new_tokens=4096,
+                use_audio_in_video=False,
+            )
+            if hasattr(model, "thinker")
+            else model.generate(  # type: ignore
+                **inputs_cuda,
+                return_audio=False,
+                use_audio_in_video=False,
+            )
+        )
+    log_vram("generation finished")
+
+    # Move optional towers back to CPU asap
+    if hasattr(model, "thinker"):
+        if getattr(model.thinker, "visual", None) is not None:
+            model.thinker.visual = model.thinker.visual.to("cpu")
+        if getattr(model.thinker, "audio_tower", None) is not None:
+            model.thinker.audio_tower = model.thinker.audio_tower.to("cpu")
+    torch.cuda.empty_cache()
+    log_vram("audio_tower → CPU & cache cleared")
+
+    generate_ids = output_ids[:, inputs.input_ids.size(1) :]
     response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-    
+
+    log_vram("decode done / end")
+    reset_vram_peak()
     return response
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze a directory of audio files using Qwen2.5-Omni GPTQ model"
-    )
-    parser.add_argument(
-        "audio_dir", type=str,
-        help="Path to the directory containing audio files to analyze"
-    )
-    parser.add_argument(
-        "--model-path", type=str,
-        default="Qwen/Qwen2.5-Omni-7B-GPTQ-Int4",
-        help="Path to the GPTQ model (local or HuggingFace repo)"
-    )
-    parser.add_argument(
-        "--system-prompt", type=str, default=None,
-        help="Custom system prompt (optional)"
-    )
+
+# ────────────────────────── CLI entry‑point ────────────────────────── #
+
+def main() -> None:
+    global DEBUG_VRAM  # noqa: PLW0603
+
+    parser = argparse.ArgumentParser(description="Analyze audio directory with Qwen2.5‑Omni GPTQ model (with optional VRAM debug)")
+    parser.add_argument("audio_dir", type=str, help="Path to directory containing audio files")
+    parser.add_argument("--model-path", type=str, default="Qwen/Qwen2.5-Omni-7B-GPTQ-Int4", help="Model path or HF repo")
+    parser.add_argument("--system-prompt", type=str, default=None, help="Custom system prompt override")
+    parser.add_argument("--debug-vram", action="store_true", help="Print VRAM usage at key steps")
     args = parser.parse_args()
 
-    # Validate input directory
-    if not os.path.isdir(args.audio_dir):
-        print(f"Error: Directory '{args.audio_dir}' not found or is not a directory!")
-        return
+    DEBUG_VRAM = args.debug_vram or bool(os.environ.get("DEBUG_VRAM"))
 
-    print(f"Loading model from {args.model_path}...")
+    if not os.path.isdir(args.audio_dir):
+        sys.exit(f"Error: '{args.audio_dir}' is not a valid directory")
+
+    if DEBUG_VRAM and not torch.cuda.is_available():
+        print("⚠️  --debug-vram was enabled but CUDA is not available; continuing without VRAM metrics.")
+
+    print(f"Loading model from {args.model_path} …")
     model, processor = load_model(args.model_path)
 
-    # Determine system prompt
-    system_prompt = args.system_prompt if args.system_prompt else SYSTEM_PROMPT
+    system_prompt = args.system_prompt or SYSTEM_PROMPT
+    extensions = {".wav", ".mp3", ".flac", ".aac", ".ogg", ".m4a"}
 
-    # Supported audio extensions
-    extensions = {'.wav', '.mp3', '.flac', '.aac', '.ogg', '.m4a'}
-
-    # Process each file in the directory
     for fname in os.listdir(args.audio_dir):
         base, ext = os.path.splitext(fname)
         if ext.lower() not in extensions:
             continue
 
         audio_path = os.path.join(args.audio_dir, fname)
-        print(f"\nAnalyzing audio file: {audio_path}")
-        print("Note: You may see a warning about system prompt - this is normal and can be ignored.")
+        print(f"\n▶︎ Analyzing: {audio_path}")
+        if DEBUG_VRAM:
+            log_vram("before analyze_audio() call")
 
-        # Run analysis
-        response = analyze_audio(audio_path, model, processor, system_prompt)
+        result_json = analyze_audio(audio_path, model, processor, system_prompt=system_prompt)
 
-        # Prepare output JSON path
-        output_filename = f"{base}_analysis.json"
-        output_path = os.path.join(args.audio_dir, output_filename)
-
-        # Save results as JSON
+        output_path = os.path.join(args.audio_dir, f"{base}_analysis.json")
         try:
-            with open(output_path, 'w', encoding='utf-8') as out_f:
-                # If response is not already a dict, wrap it
-                out_f.write(str(response))
-            print(f"Analysis saved to: {output_path}")
+            with open(output_path, "w", encoding="utf-8") as fp:
+                fp.write(str(result_json))
+            print(f"✔ Saved → {output_path}")
         except Exception as e:
-            print(f"Failed to save analysis for {fname}: {e}")
+            print(f"✖ Failed saving {fname}: {e}")
 
-if __name__ == "__main__":
+    if DEBUG_VRAM:
+        log_vram("all files processed — exiting")
+
+
+if __name__ == "__main__":  # pragma: no cover
     main()
