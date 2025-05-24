@@ -20,15 +20,19 @@ Usage (with VRAM tracking):
 Expected VRAM Usage: 
     average of 8 GB, spikes near the start between 12‑16 GB (optimization needed still)
 """
-
+import logging
+logging.getLogger("accelerate").setLevel(logging.ERROR)
+from transformers.utils import logging
+logging.set_verbosity_error()
 import os
 import sys
 import gc
 import datetime
 import argparse
 from typing import Dict, Any, Optional
-
 import torch
+
+
 
 # ────────────────────────── DEBUG HELPERS ────────────────────────── #
 DEBUG_VRAM: bool = False  # set in main()
@@ -108,7 +112,6 @@ class Qwen25OmniThinkerGPTQ(BaseGPTQModel):
    
     def pre_quantize_generate_hook_start(self):
         self.disable_talker()
-        self.has_talker = False
         self.thinker.audio_tower = move_to(self.thinker.audio_tower, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
@@ -202,8 +205,6 @@ def load_model(model_path: str, device_map: Optional[Dict[str, str]] = None):
     try:
         if hasattr(model, "disable_talker"):
             model.disable_talker()
-        if hasattr(model, "has_talker"):
-            model.has_talker = False
     except Exception as e:
         print(f"Note: Could not disable audio components: {e}")
 
