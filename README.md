@@ -22,9 +22,9 @@ The script `generate_audio_metadata.py` has been introduced, providing the follo
 
 ### 💻 Low-VRAM Requirement Profiling
 
-Based on preliminary tests with an RTX 4070 Ti SUPER (16 GB VRAM), typical VRAM usage averages approximately 8 GB, with occasional peaks of 12–16 GB. The performance profile is practical for most common scenarios, though devices with less VRAM may experience limitations.
+Based on preliminary tests with an RTX 4070 Ti SUPER (16 GB VRAM), typical VRAM usage averages approximately 8 GB, with occasional (initial) peaks of 12 GB. The performance profile is practical for most common scenarios, though devices with less VRAM may experience limitations.
 
-*Ongoing optimization is aimed at reducing these VRAM peaks, with a target minimum requirement of 12 GB and an ideal goal of 8 GB. Contributions to further reduce VRAM usage are **highly encouraged**.*
+*Ongoing optimization is aimed at reducing these VRAM peaks, with a target minimum requirement of 12 GB (**already achieved**) and an ideal goal of 8 GB. Contributions to further reduce VRAM usage are **highly encouraged**.*
 
 ### 🌍 Environment Specification
 
@@ -60,6 +60,7 @@ CUDA_VISIBLE_DEVICES=0 python3 ./generate_audio_metadata.py \
 * 📂 `--audio_dir`: Path to your audio files.
 * 🧠 `--model-path`: Path to `Qwen2.5-Omni-7B-GPTQ-Int4` model directory. Similar to the original repository, if the directory doesn't exist or no model is found, one is downloaded based on the model-path via HuggingFace.
 * 📝 `--system-prompt`: Specify the system prompt for metadata generation.
+* 🔍 `--debug-vram`: Enables more detailed print-outs, displaying VRAM statistics at various points.
 
 ---
 

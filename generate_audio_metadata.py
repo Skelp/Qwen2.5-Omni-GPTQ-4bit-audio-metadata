@@ -18,7 +18,7 @@ Usage (with VRAM tracking):
     CUDA_VISIBLE_DEVICES=0 python3 ./generate_audio_metadata_debug.py '{your_audio_directory}' --debug-vram
 
 Expected VRAM Usage: 
-    average of 8 GB, spikes near the start between 12‑16 GB (optimization needed still)
+    average of 8 GB, spikes near the start to around 12 GB (optimization needed still)
 """
 import logging
 logging.getLogger("accelerate").setLevel(logging.ERROR)
